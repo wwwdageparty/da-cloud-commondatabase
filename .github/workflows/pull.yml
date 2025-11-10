@@ -1,0 +1,35 @@
+name: Sync Repositories
+
+on:
+  workflow_dispatch:  # This allows you to trigger the action manually via GitHub UI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout public repository
+      uses: actions/checkout@v3
+      with:
+        repository: your-username/public-repository  # Replace with your public repo
+        token: ${{ secrets.GITHUB_TOKEN }}  # Automatically provided by GitHub Actions
+
+    - name: Set up Git for pushing
+      run: |
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        
+    - name: Clone private repository
+      run: |
+        git clone --depth 1 --branch main https://github.com/your-username/private-repository.git private-repo  # Replace with your private repo
+        cp -r private-repo/* .  # Copy all contents from the private repository into the public repo's working directory
+
+    - name: Add and commit changes
+      run: |
+        git add .
+        git commit -m "Sync public repository from private repository"
+        git push origin main
+
+    - name: Clean up
+      run: |
+        rm -rf private-repo
