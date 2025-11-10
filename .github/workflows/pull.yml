@@ -19,7 +19,7 @@ jobs:
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
     - name: Check Secrets
       run: |
-        echo "PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}"
+        echo "PRIVATE_REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}"
         
     - name: Clone private repository
       run: |
