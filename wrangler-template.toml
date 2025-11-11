@@ -12,10 +12,10 @@ database_id = "d1 database id"
 
 [vars]
 DA_WRITETOKEN = "Demo111+"
-DA_LOGSERVICEURL = "https://demo2.dglog.workers.dev/api";
-DA_LOGSERVICETOKEN = "Demo111+";
-DA_SERVICEID = "dacds";
-DA_INSTANCEID = "dev1";
+DA_LOGSERVICEURL = "https://demo2.dglog.workers.dev/api"
+DA_LOGSERVICETOKEN = "Demo111+"
+DA_SERVICEID = "dacds"
+DA_INSTANCEID = "dev1"
 
 [observability]
 enabled = true
