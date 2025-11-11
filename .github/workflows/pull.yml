@@ -11,7 +11,7 @@ jobs:
     - name: Checkout public repository
       uses: actions/checkout@v3
       with:
-        token: ${{ secrets.GITHUB_TOKEN }}  # Automatically provided by GitHub Actions
+        token: ${{ secrets.TOKEN }}  # Automatically provided by GitHub Actions
 
     - name: Set up Git for pushing
       run: |
@@ -24,7 +24,7 @@ jobs:
     - name: Clone private repository
       run: |
         echo "Cloning private repository..."
-        git clone --depth 1 --branch master https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/DaGeRoot/da-cloud-commondatabase.git private-repo
+        git clone --depth 1 --branch master https://x-access-token:${{ secrets.TOKEN }}@github.com/DaGeRoot/da-cloud-commondatabase.git private-repo
         cp -r private-repo/* .  # Copy all contents from the private repository into the public repo's working directory
 
 
