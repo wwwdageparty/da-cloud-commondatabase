@@ -2,7 +2,7 @@
 # Keeps your added files and folders.
 # 🧩 Save this as .github/workflows/sync.yml
 
-name: Safe Sync from Upstream
+name: da sync upstream da-cloud-commondatabase
 
 on:
   schedule:
