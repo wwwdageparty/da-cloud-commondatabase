@@ -11,7 +11,7 @@ database_name = "d1 database name"
 database_id = "d1 database id"
 
 [vars]
-DA_WRITETOKEN = "Demo111+"
+DA_WRITE_TOKEN = "Demo111+"
 DA_LOGSERVICEURL = "https://demo2.dglog.workers.dev/api"
 DA_LOGSERVICETOKEN = "Demo111+"
 DA_SERVICEID = "dacds"
