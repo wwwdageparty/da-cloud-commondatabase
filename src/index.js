@@ -68,11 +68,8 @@ async function handleApiRequest(action, payload) {
         }
         const stmt = db.prepare(sql).bind(...values);
         const rows = await stmt.all();
-        if (!rows.results || rows.results.length === 0) {
-          await errDelegate(`No data found in ${G_tableName}`);
-          return { error: "No data found" };
-        }
-        return null;
+        // RETURN rows even if empty
+        return { rows: rows.results || [] };
       }
 
       case "delete": {
@@ -127,12 +124,13 @@ async function handleApi(request, env) {
 
   try {
     const ret = await handleApiRequest(action, body.payload);
-    
-    if (ret == null) {
-      return ack(requestId);
-    } else {
-      return nack(requestId, "REQUEST_FAILED", JSON.stringify(ret, null, 2)); 
+
+    if (ret && ret.error) {
+      //return nack(requestId, "REQUEST_FAILED", JSON.stringify(ret, null, 2));
+      return nack(requestId, "REQUEST_FAILED", ret.error);
     }
+    
+    return ack(requestId, ret || {});
 
   } catch (err) {
     await errDelegate(`handleApiRequest exception: ${err.message}`);
