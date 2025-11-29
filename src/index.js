@@ -11,6 +11,8 @@ export default {
 
     if (url.pathname === "/api") {
       return await handleApi(request, env);
+    } else if (url.pathname === "/meta") {
+      return handleMeta(env);
     } else {
       return new Response("Not Found", { status: 404 });
     }
@@ -193,6 +195,19 @@ async function handleApi(request, env) {
     return nack(requestId, "DB_ERROR", err.message);
   }
 }
+/////////////////////////   Meta Endpoint   /////////////////////////
+function handleMeta(env) {
+  const instance =
+    env.INSTANCEID && env.INSTANCEID.trim() !== ""
+      ? env.INSTANCEID.trim()
+      : G_INSTANCE;
+
+  return jsonResponse({
+    service: C_SERVICE,
+    version: C_VERSION,
+    instance,
+  });
+}
 
 // ---------- HELPERS ----------
 function ack(requestId, payload = {}) {
@@ -259,3 +274,6 @@ let G_tableName = "data1";
 const allowedColumns = [
   "c1", "c2", "c3", "i1", "i2", "i3", "d1", "d2", "d3", "t1", "t2", "t3", "v1", "v2", "v3"
 ];
+const C_SERVICE="da-cloud-cfd1-rack";
+const C_VERSION = "0.0.1";
+let G_INSTANCE="default";
