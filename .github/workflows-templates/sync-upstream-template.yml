@@ -30,18 +30,15 @@ jobs:
         git remote | grep upstream || git remote add upstream https://github.com/wwwdageparty/da-cloud-cfd1-rack.git
         git fetch upstream
 
-    - name: Merge upstream (keep my files)
+    - name: Merge upstream (keep my custom files)
       run: |
         git checkout master
-        # Try merge first (safe)
-        git merge upstream/master --allow-unrelated-histories --no-edit || echo "Merge had conflicts, proceeding to manual resolution"
-
-        # If merge conflicts occur, prefer *your* versions for local files
-        git checkout --ours .
-        git add .
-
-        # Commit if there are merge results
-        git diff --cached --quiet || git commit -m "🔄 Sync with upstream (kept local files)"
+    
+        # Merge upstream, prefer upstream changes on conflicts
+        git merge upstream/master --allow-unrelated-histories -X theirs --no-edit || true
+    
+        # Commit only if there are changes
+        git diff --cached --quiet || git commit -m "🔄 Sync with upstream (kept custom files)"
 
     - name: Push updates
       run: |
