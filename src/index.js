@@ -1,9 +1,8 @@
-
-
+// ================== Cloudflare Worker ==================
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    G_CTX = ctx
+    G_CTX = ctx;
 
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405 });
@@ -19,132 +18,175 @@ export default {
   },
 };
 
+// ================== Core API ==================
 async function handleApiRequest(action, payload) {
   const db = G_DB;
-  if (payload.table_name && payload.table_name !== "") {
-    G_tableName = payload.table_name;
-  }
+  const tableName = resolveTableName(payload);
 
-  const keys = Object.keys(payload).filter(key => key !== "table_name");
+  if (!tableName) {
+    await errDelegate("Invalid or missing table_name");
+    return { error: "Invalid or missing table_name" };
+  }
 
   try {
     switch (action) {
+      // ---------- INSERT ----------
       case "post": {
-        const invalidKeys = keys.filter(key => !allowedColumns.includes(key));
+        const keys = Object.keys(payload).filter(k => k !== "table_name");
+
+        const invalidKeys = keys.filter(k => !allowedColumns.includes(k));
         if (invalidKeys.length > 0) {
-          await errDelegate(`Invalid columns in payload: ${invalidKeys.join(", ")}`);
           return { error: `Invalid columns: ${invalidKeys.join(", ")}` };
         }
+
         const placeholders = keys.map(() => "?").join(",");
-        const sql = `INSERT INTO ${G_tableName} (${keys.join(",")}) VALUES (${placeholders})`;
+        const sql = `INSERT INTO ${tableName} (${keys.join(",")}) VALUES (${placeholders})`;
         const values = keys.map(k => payload[k]);
+
         await db.prepare(sql).bind(...values).run();
-        return null; // ✅ success
+        return null;
       }
 
+      // ---------- UPDATE / TOUCH ----------
       case "put": {
         if (!payload.id) {
-          await errDelegate("Missing 'id' for update");
           return { error: "Missing 'id' for update" };
         }
-        if (keys.length === 0) {
-          await errDelegate("No fields to update");
-          return { error: "No fields to update" };
+
+        const keysPut = Object.keys(payload).filter(
+          k => k !== "table_name" && k !== "id"
+        );
+
+        const invalidKeys = keysPut.filter(k => !allowedColumns.includes(k));
+        if (invalidKeys.length > 0) {
+          return { error: `Invalid columns: ${invalidKeys.join(", ")}` };
         }
 
-        const { id, ...fields } = payload;
-        const setClause = keys.map(k => `${k} = ?`).join(", ");
-        const sql = `UPDATE ${G_tableName} SET ${setClause}, v2 = CURRENT_TIMESTAMP WHERE id = ?`;
-        const values = [...keys.map(k => fields[k]), id];
-        await db.prepare(sql).bind(...values).run();
+        let sql;
+        let values;
+
+        if (keysPut.length === 0) {
+          sql = `UPDATE ${tableName} SET v2 = CURRENT_TIMESTAMP WHERE id = ?`;
+          values = [payload.id];
+        } else {
+          const setClause = keysPut.map(k => `${k} = ?`).join(", ");
+          sql = `UPDATE ${tableName} SET ${setClause}, v2 = CURRENT_TIMESTAMP WHERE id = ?`;
+          values = [...keysPut.map(k => payload[k]), payload.id];
+        }
+
+        const result = await db.prepare(sql).bind(...values).run();
+        if (result.changes === 0) {
+          return { error: `Record not found: id=${payload.id}` };
+        }
+
         return null;
       }
 
-case "get": {
-  const tableName = G_tableName;
-  const options = payload; // Using full payload as options
+      // ---------- QUERY ----------
+      case "get": {
+        const { table_name, ...options } = payload;
 
-  // Helper to check if a column is valid
-  function checkColumnValid(col) {
-    return allowedColumns.includes(col);
-  }
+        const columnFilters = Object.keys(options).filter(
+          k => !allowedQueryOptions.includes(k)
+        );
 
-  let query = `SELECT * FROM ${tableName}`;
-  const params = [];
-  const conditions = [];
-
-  // Determine order direction
-  const order = options.order === "desc" ? "DESC" : "ASC";
-  const orderBy = checkColumnValid(options.orderby) ? options.orderby : "id";
-
-  // Prevent ambiguity: cannot use both minId and offset
-  if (options.minId !== undefined && options.offset !== undefined) {
-    return { error: "Cannot use both 'minId' and 'offset' together." };
-  }
-
-  // Apply other filter keys (excluding pagination and order keys)
-  const filterKeys = Object.keys(options).filter(
-    k => !["minId", "offset", "order", "orderby", "table_name"].includes(k)
-  );
-
-  for (const key of filterKeys) {
-    if (!allowedColumns.includes(key)) {
-      return { error: `Invalid column in filters: ${key}` };
-    }
-    conditions.push(`${key} = ?`);
-    params.push(options[key]);
-  }
-
-  // Keyset pagination
-  if (options.offset != null && options.offset !== 0) {
-    if (order === "ASC") {
-      conditions.push(`${orderBy} > ?`);
-    } else {
-      conditions.push(`${orderBy} < ?`);
-    }
-    params.push(options.offset);
-  } else if (options.minId != null) {
-    if (order === "ASC") {
-      conditions.push(`${orderBy} > ?`);
-    } else {
-      conditions.push(`${orderBy} < ?`);
-    }
-    params.push(options.minId);
-  }
-
-  // Build WHERE clause if conditions exist
-  if (conditions.length > 0) {
-    query += " WHERE " + conditions.join(" AND ");
-  }
-
-  // Append ORDER BY clause
-  query += ` ORDER BY ${orderBy} ${order}`;
-
-  // Optional: Add limit if you want, e.g., LIMIT 100
-  // query += " LIMIT 100";
-
-  const stmt = db.prepare(query).bind(...params);
-  const result = await stmt.all();
-
-  return { rows: result.results || [] };
-}
-
-
-      case "delete": {
-        if (keys.length === 0) {
-          await errDelegate("No condition provided for delete");
-          return { error: "Need at least one condition to delete" };
+        for (const k of columnFilters) {
+          if (!allowedColumns.includes(k)) {
+            return { error: `Invalid column in filters: ${k}` };
+          }
         }
-        const where = keys.map(k => `${k} = ?`).join(" AND ");
-        const sql = `DELETE FROM ${G_tableName} WHERE ${where}`;
-        const values = keys.map(k => payload[k]);
-        await db.prepare(sql).bind(...values).run();
-        return null;
+
+        let query = `SELECT * FROM ${tableName}`;
+        const params = [];
+        const conditions = [];
+
+        const order = options.order === "desc" ? "DESC" : "ASC";
+        const orderBy = allowedColumns.includes(options.orderby)
+          ? options.orderby
+          : "id";
+
+        if (options.minId !== undefined && options.offset !== undefined) {
+          return { error: "Cannot use both 'minId' and 'offset' together." };
+        }
+
+        for (const k of columnFilters) {
+          conditions.push(`${k} = ?`);
+          params.push(options[k]);
+        }
+
+        if (options.offset != null) {
+          conditions.push(`${orderBy} ${order === "ASC" ? ">" : "<"} ?`);
+          params.push(options.offset);
+        } else if (options.minId != null) {
+          conditions.push(`${orderBy} ${order === "ASC" ? ">" : "<"} ?`);
+          params.push(options.minId);
+        }
+
+        if (conditions.length > 0) {
+          query += " WHERE " + conditions.join(" AND ");
+        }
+
+        query += ` ORDER BY ${orderBy} ${order}`;
+
+        const limit =
+          Number.isInteger(options.limit) && options.limit > 0
+            ? Math.min(options.limit, 500)
+            : 100;
+
+        query += ` LIMIT ${limit}`;
+
+        const result = await db.prepare(query).bind(...params).all();
+        return { rows: result.results || [] };
+      }
+
+      // ---------- DELETE ----------
+      case "delete": {
+        const keys = Object.keys(payload).filter(k => k !== "table_name");
+
+        const invalidKeys = keys.filter(k => !allowedColumns.includes(k));
+        if (invalidKeys.length > 0) {
+          return { error: `Invalid columns: ${invalidKeys.join(", ")}` };
+        }
+
+        let sql;
+        let values = [];
+
+        if (keys.length === 0) {
+          sql = `DELETE FROM ${tableName}`;
+          await errDelegate(`DELETE ALL from ${tableName}`);
+        } else {
+          const where = keys.map(k => `${k} = ?`).join(" AND ");
+          sql = `DELETE FROM ${tableName} WHERE ${where}`;
+          values = keys.map(k => payload[k]);
+        }
+
+        const result = await db.prepare(sql).bind(...values).run();
+        return { deleted: result.changes ?? 0 };
+      }
+
+      // ---------- CREATE INDEX ----------
+      case "index": {
+        const col = payload.column;
+
+        if (!col || typeof col !== "string") {
+          return { error: "Missing or invalid column for index" };
+        }
+
+        if (!allowedColumns.includes(col) || col === "id") {
+          return { error: `Index not allowed on column: ${col}` };
+        }
+
+        const indexName = `idx_${tableName}__${col}`;
+        const sql = `CREATE INDEX IF NOT EXISTS ${indexName} ON ${tableName} (${col})`;
+
+        await db.exec(sql);
+        await errDelegate(`INDEX created: ${tableName}.${col}`);
+
+        return { indexed: col };
       }
 
       default:
-        await errDelegate(`Unknown action: ${action}`);
-        return { error: "Unknown action" };
+        return { error: `Unknown action: ${action}` };
     }
   } catch (err) {
     await errDelegate(`DB operation failed: ${err.message}`);
@@ -152,15 +194,14 @@ case "get": {
   }
 }
 
-
+// ================== HTTP Wrapper ==================
 async function handleApi(request, env) {
   const auth = request.headers.get("Authorization");
   if (!auth || !auth.startsWith("Bearer ")) {
     return nack("unknown", "UNAUTHORIZED", "Missing or invalid Authorization header");
   }
 
-  const token = auth.split(" ")[1];
-  if (token !== env.DA_WRITE_TOKEN) {
+  if (auth.split(" ")[1] !== env.DA_WRITE_TOKEN) {
     return nack("unknown", "INVALID_TOKEN", "Token authentication failed");
   }
 
@@ -173,43 +214,30 @@ async function handleApi(request, env) {
 
   const requestId = body.request_id || "unknown";
   if (!body.payload) {
-    return nack(requestId, "INVALID_FIELD", "Missing required field: payload");
+    return nack(requestId, "INVALID_FIELD", "Missing payload");
   }
-  const action = body.action || "";
 
   G_ENV = env;
   G_DB = env.DB;
 
-  try {
-    const ret = await handleApiRequest(action, body.payload);
-    
-    if (ret && ret.error) {
-      //return nack(requestId, "REQUEST_FAILED", JSON.stringify(ret, null, 2));
-      return nack(requestId, "REQUEST_FAILED", ret.error);
-    }
-    
-    return ack(requestId, ret || {});
-
-  } catch (err) {
-    await errDelegate(`handleApiRequest exception: ${err.message}`);
-    return nack(requestId, "DB_ERROR", err.message);
+  const ret = await handleApiRequest(body.action || "", body.payload);
+  if (ret && ret.error) {
+    return nack(requestId, "REQUEST_FAILED", ret.error);
   }
-}
-/////////////////////////   Meta Endpoint   /////////////////////////
-function handleMeta(env) {
-  const instance =
-    env.INSTANCEID && env.INSTANCEID.trim() !== ""
-      ? env.INSTANCEID.trim()
-      : G_INSTANCE;
 
+  return ack(requestId, ret || {});
+}
+
+// ================== META ==================
+function handleMeta(env) {
   return jsonResponse({
     service: C_SERVICE,
     version: C_VERSION,
-    instance,
+    instance: env.INSTANCEID || G_INSTANCE,
   });
 }
 
-// ---------- HELPERS ----------
+// ================== HELPERS ==================
 function ack(requestId, payload = {}) {
   return jsonResponse({ type: "ack", request_id: requestId, payload });
 }
@@ -224,56 +252,52 @@ function nack(requestId, code, message) {
 function jsonResponse(obj, status = 200) {
   return new Response(JSON.stringify(obj, null, 2), {
     status,
-    headers: { "Content-Type": "application/json" }
+    headers: { "Content-Type": "application/json" },
   });
 }
 
-// ---------- LOGGING ----------
 async function errDelegate(msg) {
   console.error(msg);
-  G_CTX.waitUntil(postLogToGateway("11", 11, `❌ *Error*\n${msg}`));
-}
-async function postLogToGateway(request_id, level, message) {
-  const url = C_LogServiceUrl;
-  const body = {
-    version: "v1",
-    request_id,
-    service: "log",
-    action: "append",
-    payload: {
-      service: C_ServiceID,
-      instance: C_InstanceID,
-      level,
-      message
-    }
-  };
-
-  try {
-    const resp1 = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${C_LogServiceToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body)
-    });
-
-    const text = await resp1.text();
-    console.log("Log service response:", text);
-
-  } catch (err) {
-    console.error("❌ Error posting log:", err.message);
-  }
+  G_CTX.waitUntil(Promise.resolve());
 }
 
+// ================== TABLE SAFETY ==================
+const FORBIDDEN_TABLES = new Set([
+  "sqlite_master",
+  "sqlite_schema",
+  "sqlite_temp_master",
+  "sqlite_sequence",
+]);
 
+function resolveTableName(payload) {
+  if (!payload.table_name || payload.table_name.trim() === "") return null;
+  const name = payload.table_name.trim();
+  if (FORBIDDEN_TABLES.has(name)) return null;
+  return name;
+}
+
+// ================== GLOBALS ==================
 let G_ENV = null;
 let G_DB = null;
 let G_CTX = null;
-let G_tableName = "data1";
+
 const allowedColumns = [
-  "c1", "c2", "c3", "i1", "i2", "i3", "d1", "d2", "d3", "t1", "t2", "t3", "v1", "v2", "v3"
+  "c1", "c2", "c3",
+  "i1", "i2", "i3",
+  "d1", "d2", "d3",
+  "t1", "t2", "t3",
+  "v1", "v2", "v3",
 ];
-const C_SERVICE="da-cloud-cfd1-rack";
+
+const allowedQueryOptions = [
+  "minId",
+  "offset",
+  "order",
+  "orderby",
+  "limit",
+  "table_name",
+];
+
+const C_SERVICE = "da-cloud-cfd1-rack";
 const C_VERSION = "0.0.1";
-let G_INSTANCE="default";
+let G_INSTANCE = "default";
