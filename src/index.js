@@ -19,8 +19,8 @@ export default {
 };
 
 // ================== Core API ==================
-async function handleApiRequest(action, payload) {
-  const db = G_DB;
+async function handleApiRequest(action, payload, db, ctx) {
+  // const db = G_DB;
   const tableName = resolveTableName(payload);
 
   if (!tableName) {
@@ -30,6 +30,162 @@ async function handleApiRequest(action, payload) {
 
   try {
     switch (action) {
+      // ---------- EXEC (God Mode) ----------
+      case "exec": {
+        const { query, params } = payload;
+
+        if (!query) {
+          return { error: "Missing SQL query" };
+        }
+
+        // Safety: Block destructive commands if they target system tables
+        const lowerQuery = query.toLowerCase().trim();
+        if (lowerQuery.includes("sqlite_master") || lowerQuery.includes("_cf_")) {
+          return { error: "Access to system tables via EXEC is forbidden." };
+        }
+
+        try {
+          const stmt = db.prepare(query);
+          
+          // Use .bind() if parameters are provided, otherwise just run/all
+          const result = params && Array.isArray(params) 
+            ? await stmt.bind(...params).all() 
+            : await stmt.all();
+
+          return { 
+            success: true, 
+            results: result.results || [],
+            meta: result.meta // Contains rows_read, rows_written, etc.
+          };
+        } catch (err) {
+          return { error: `SQL Execution Error: ${err.message}` };
+        }
+      }
+      // ---------- Create Table ----------
+      case "create_table": {
+        const c1Unique = !!payload.c1_unique;
+        const c1Constraint = c1Unique ? "UNIQUE" : "";
+        
+        const tableSql = `
+          CREATE TABLE IF NOT EXISTS ${tableName} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            c1 VARCHAR(255) ${c1Constraint},
+            c2 VARCHAR(255), c3 VARCHAR(255),
+            i1 INT, i2 INT, i3 INT,
+            d1 DOUBLE, d2 DOUBLE, d3 DOUBLE,
+            t1 TEXT, t2 TEXT, t3 TEXT,
+            v1 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            v2 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            v3 TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `;
+
+        const statements = [db.prepare(tableSql)];
+
+        // 1. Index c1 (only if not already UNIQUE, as UNIQUE creates its own index)
+        if (!c1Unique) {
+          statements.push(
+            db.prepare(`CREATE INDEX IF NOT EXISTS idx_${tableName}_c1 ON ${tableName}(c1)`)
+          );
+        }
+
+        // 2. Index v2 (Always created to speed up "last updated" queries)
+        statements.push(
+          db.prepare(`CREATE INDEX IF NOT EXISTS idx_${tableName}_v2 ON ${tableName}(v2)`)
+        );
+
+        // Execute all in one batch for efficiency
+        await db.batch(statements);
+
+        return { 
+          message: `Table ${tableName} is ready with indices on ${c1Unique ? 'v2' : 'c1, v2'}.` 
+        };
+      }
+
+      // ---------- List All Tables ----------
+      case "list_tables": {
+        // Query sqlite_master for user-created tables
+        // Excluding internal SQLite and Cloudflare metadata tables
+        const query = `
+          SELECT name 
+          FROM sqlite_master 
+          WHERE type='table' 
+            AND name NOT LIKE 'sqlite_%' 
+            AND name NOT LIKE '_cf_%'
+        `;
+        
+        const { results } = await db.prepare(query).all();
+        const tableNames = results.map(row => row.name);
+        
+        return { 
+          count: tableNames.length,
+          tables: tableNames 
+        };
+      }
+
+      // ---------- Batch Insert ----------
+      case "batch_post": {
+        const records = payload.data; // Expecting an array of objects
+        if (!Array.isArray(records)) return { error: "Payload 'data' must be an array" };
+
+        const statements = records.map(record => {
+          const keys = Object.keys(record).filter(k => allowedColumns.includes(k));
+          const placeholders = keys.map(() => "?").join(",");
+          const sql = `INSERT INTO ${tableName} (${keys.join(",")}) VALUES (${placeholders})`;
+          const values = keys.map(k => record[k]);
+          return db.prepare(sql).bind(...values);
+        });
+
+        const results = await db.batch(statements);
+        return { inserted: results.length };
+      }
+
+      // ---------- Drop Table (Dangerous/Admin) ----------
+      case "drop_table": {
+        // Double check resolution and forbidden list
+        if (!tableName) return { error: "Invalid table name" };
+        
+        const sql = `DROP TABLE IF EXISTS ${tableName}`;
+        await db.prepare(sql).run();
+        
+        return { message: `Table ${tableName} has been deleted.` };
+      }
+      // ---------- Create Index ----------
+      case "create_index": {
+        const col = payload.column;
+        const isUnique = !!payload.unique;
+
+        if (!col || !allowedColumns.includes(col)) {
+          return { error: `Invalid or missing column: ${col}` };
+        }
+
+        // Standardized naming convention: idx_tablename_column
+        const indexName = `idx_${tableName}_${col}`;
+        const uniqueStr = isUnique ? "UNIQUE" : "";
+        
+        const sql = `CREATE ${uniqueStr} INDEX IF NOT EXISTS ${indexName} ON ${tableName} (${col})`;
+        
+        await db.prepare(sql).run();
+        return { message: `Index ${indexName} created.` };
+      }
+      case "list_indices": {
+          const sql = `PRAGMA index_list(${tableName})`;
+          const { results } = await db.prepare(sql).all();
+          return { indices: results };
+        }
+
+      // ---------- Drop Index ----------
+      case "drop_index": {
+        const col = payload.column;
+        if (!col) return { error: "Missing column name to drop index" };
+
+        const indexName = `idx_${tableName}_${col}`;
+        const sql = `DROP INDEX IF EXISTS ${indexName}`;
+        
+        await db.prepare(sql).run();
+        return { message: `Index ${indexName} dropped.` };
+      }
+
       // ---------- INSERT ----------
       case "post": {
         const keys = Object.keys(payload).filter(k => k !== "table_name");
@@ -216,11 +372,13 @@ async function handleApi(request, env) {
   if (!body.payload) {
     return nack(requestId, "INVALID_FIELD", "Missing payload");
   }
-
-  G_ENV = env;
-  G_DB = env.DB;
-
-  const ret = await handleApiRequest(body.action || "", body.payload);
+  
+  const ret = await handleApiRequest(
+    body.action || "", 
+    body.payload, 
+    env.DB, 
+    request // or a custom context object
+  );
   if (ret && ret.error) {
     return nack(requestId, "REQUEST_FAILED", ret.error);
   }
@@ -277,11 +435,10 @@ function resolveTableName(payload) {
 }
 
 // ================== GLOBALS ==================
-let G_ENV = null;
-let G_DB = null;
 let G_CTX = null;
 
 const allowedColumns = [
+  "id",
   "c1", "c2", "c3",
   "i1", "i2", "i3",
   "d1", "d2", "d3",
