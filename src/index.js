@@ -129,6 +129,7 @@ async function handleApiRequest(action, payload, db, ctx) {
         if (!Array.isArray(records)) return { error: "Payload 'data' must be an array" };
 
         const statements = records.map(record => {
+          normalizeJsonColumns(record);
           const keys = Object.keys(record).filter(k => allowedColumns.includes(k));
           const placeholders = keys.map(() => "?").join(",");
           const sql = `INSERT INTO ${tableName} (${keys.join(",")}) VALUES (${placeholders})`;
@@ -188,6 +189,7 @@ async function handleApiRequest(action, payload, db, ctx) {
 
       // ---------- INSERT ----------
       case "post": {
+        normalizeJsonColumns(payload);
         const keys = Object.keys(payload).filter(k => k !== "table_name");
 
         const invalidKeys = keys.filter(k => !allowedColumns.includes(k));
@@ -204,39 +206,88 @@ async function handleApiRequest(action, payload, db, ctx) {
       }
 
       // ---------- UPDATE / TOUCH ----------
+      // 2026.0126
       case "put": {
-        if (!payload.id) {
-          return { error: "Missing 'id' for update" };
+        const hasId = payload.id != null;
+        const hasC1 = payload.c1 != null;
+      
+        if (!hasId && !hasC1) {
+          return { error: "Missing 'id' or 'c1' for update" };
         }
-
+        normalizeJsonColumns(payload);
+      
+        // Do not allow changing the key used for lookup
         const keysPut = Object.keys(payload).filter(
-          k => k !== "table_name" && k !== "id"
+          k => k !== "table_name" && k !== "id" && k !== "c1"
         );
-
+      
         const invalidKeys = keysPut.filter(k => !allowedColumns.includes(k));
         if (invalidKeys.length > 0) {
           return { error: `Invalid columns: ${invalidKeys.join(", ")}` };
         }
-
+      
         let sql;
         let values;
-
+      
+        const whereClause = hasId ? "id = ?" : "c1 = ?";
+        const whereValue = hasId ? payload.id : payload.c1;
+      
         if (keysPut.length === 0) {
-          sql = `UPDATE ${tableName} SET v2 = CURRENT_TIMESTAMP WHERE id = ?`;
-          values = [payload.id];
+          sql = `
+            UPDATE ${tableName}
+            SET v2 = CURRENT_TIMESTAMP
+            WHERE ${whereClause}
+          `;
+          values = [whereValue];
         } else {
           const setClause = keysPut.map(k => `${k} = ?`).join(", ");
-          sql = `UPDATE ${tableName} SET ${setClause}, v2 = CURRENT_TIMESTAMP WHERE id = ?`;
-          values = [...keysPut.map(k => payload[k]), payload.id];
+          sql = `
+            UPDATE ${tableName}
+            SET ${setClause}, v2 = CURRENT_TIMESTAMP
+            WHERE ${whereClause}
+          `;
+          values = [...keysPut.map(k => payload[k]), whereValue];
         }
-
+      
         const result = await db.prepare(sql).bind(...values).run();
+      
         if (result.changes === 0) {
-          return { error: `Record not found: id=${payload.id}` };
+          return { error: "Record not found or no rows updated" };
         }
-
-        return null;
+      
+        return { updated: result.changes };
       }
+      case "update_c1": {
+        if (!payload.id || !payload.new_c1) {
+          return { error: "Missing id or new_c1" };
+        }
+      
+        const sql = `
+          UPDATE ${tableName}
+          SET c1 = ?, v2 = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `;
+      
+        try {
+          const result = await db
+            .prepare(sql)
+            .bind(payload.new_c1, payload.id)
+            .run();
+      
+          if (result.changes === 0) {
+            return { error: "Record not found" };
+          }
+      
+          return { renamed: true };
+        } catch (err) {
+          if (err.message.includes("UNIQUE")) {
+            return { error: "c1 already exists" };
+          }
+          throw err;
+        }
+      }
+
+
 
       // ---------- QUERY ----------
       case "get": {
@@ -417,6 +468,15 @@ function jsonResponse(obj, status = 200) {
 async function errDelegate(msg) {
   console.error(msg);
   G_CTX.waitUntil(Promise.resolve());
+}
+
+// ================== Table HELPERS ==================
+function normalizeJsonColumns(obj) {
+  for (const k of ["t1", "t2", "t3"]) {
+    if (obj[k] !== null && typeof obj[k] === "object") {
+      obj[k] = JSON.stringify(obj[k]);
+    }
+  }
 }
 
 // ================== TABLE SAFETY ==================
